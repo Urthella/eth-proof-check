@@ -9,7 +9,8 @@ proofs any node gives with `eth_getProof`, instead of taking the node's word for
    the reference its parent holds, and checks the account it reaches, or its absence, is what the
    node claims: nonce, balance, storage root and code hash;
 3. **walks each slot's proof** from the account's storage root the same way;
-4. **checks the account's code** from `eth_getCode` hashes to its code hash.
+4. **checks the account's code** from `eth_getCode` hashes to its code hash;
+5. with `--erc20 HOLDER`, **proves the holder's token balance** from each token's storage.
 
 It exits 1 if anything doesn't hold.
 
@@ -28,6 +29,10 @@ dependencies, its own Keccak-256 and RLP, so every step can be read:
 - **An address nobody has used** is proven empty: 8 nodes lead to another account's leaf, whose
   path turns away from this address. An empty slot can end either way: WETH's slot 0x99 at a
   leaf, the deposit contract's at a branch with nothing in its place.
+- **A token balance is a storage slot too.** `balanceOf` is code the node runs for you; the
+  balance itself sits in a mapping in the token's storage, at `keccak(holder, i)` for Solidity's
+  mapping at index *i*, or `keccak(i, holder)` for Vyper's. WETH keeps it at index 3, USDC at 9,
+  USDT at 2, and Curve's CRV at Vyper's 3.
 
 ## Quick start
 
@@ -56,6 +61,15 @@ The three accounts are WETH, the beacon chain deposit contract and an unused add
 
 - `ADDRESS...` are the accounts to check.
 - `--slot SLOT` adds a storage slot, decimal or hex, to check in each; repeat it for more.
+- `--erc20 HOLDER` treats each address as an ERC-20 token, and proves `HOLDER`'s balance from its
+  storage. Here for the Uniswap v3 USDC/WETH pool:
+
+  ```text
+  0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48: an account, 9 proof nodes from the state root: nonce 1, balance 0 ETH, 2,186 bytes of code that hash to its code hash
+    balance of 0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640: 12,516,451,776,381, in the Solidity mapping at index 9, 7 proof nodes
+  ```
+
+  Balances are in the token's smallest unit: 12,516,451.776381 USDC.
 - `--block N` picks the block: `latest` by default, or `finalized`, `safe` or a number. Nodes that
   aren't archives keep the state of recent blocks only.
 - `--rpc URL` picks the node: `https://ethereum-rpc.publicnode.com` by default. Any EVM chain's
@@ -83,6 +97,12 @@ check: a node without the block's state, or bad arguments.
 - **The keys** are Keccak-256 of the address for accounts, and of the slot as 32 bytes for
   storage. The account is the RLP of its nonce, balance, storage root and code hash; a slot's value
   is the RLP of its bytes.
+- **With `--erc20`**, one proof per token covers the 40 slots the holder's balance could be in:
+  - Solidity's and Vyper's mapping at indexes 0 to 19, each checked like any slot.
+  - `balanceOf`, through `eth_call`, says which one holds the balance: the value shown is the
+    proof's, and `balanceOf` only picks the slot.
+  - A zero balance can't pick one, since every empty slot holds zero, so it's reported as not
+    found, exit 2, and so is a balance no candidate holds.
 
 ## How it's checked
 
@@ -100,10 +120,18 @@ check: a node without the block's state, or bad arguments.
   - a claimed balance the proof doesn't hold exits 1, and so does a header with another state root;
   - a rate-limited node is asked again;
   - a node without the state, bad arguments and an unreachable node exit 2.
-- **Mutation testing:** twenty-five deliberate bugs were planted one at a time, and the tests
+- **Token balances:** WETH and USDC held by the Uniswap v3 pool, and CRV held by Curve's
+  vote-escrow contract, saved with all their candidate slots.
+  - Each is found at its mapping, Vyper's for CRV, and proven.
+  - A zero balance, or one no slot holds, isn't found.
+  - End to end, `--erc20` lists only the balance, not the candidates, and a `balanceOf` that no
+    slot backs exits 2.
+- **Mutation testing:** thirty-three deliberate bugs were planted one at a time, and the tests
   caught every one.
-- **Live**, on 2026-11-24, at block 26,485,152 from publicnode: WETH, the deposit contract and an
-  unused address, all as above.
+- **Live**, on 2026-11-24 from publicnode:
+  - at block 26,485,152, WETH, the deposit contract and an unused address, all as above;
+  - at block 26,485,204, the pool's WETH, USDC and USDT, at indexes 3, 9 and 2. It held no DAI,
+    so that one was reported not found.
 
 ## Limits
 
@@ -113,6 +141,12 @@ check: a node without the block's state, or bad arguments.
 - **Proofs need the state.** Most public nodes keep recent blocks' state only, about the last 128.
 - **Only Merkle-Patricia tries.** Ethereum has used them since launch; a move to another tree
   would need new proofs.
+- **`--erc20` trusts `balanceOf` to pick the slot**, not for the value. A node that lies could
+  point it at another mapping keyed by the holder, and the slot's index is shown so you can
+  check. Tokens that keep balances elsewhere aren't found:
+  - in namespaced storage (ERC-7201, as OpenZeppelin's upgradeable contracts do);
+  - past index 19;
+  - as shares, like stETH.
 
 ## License
 

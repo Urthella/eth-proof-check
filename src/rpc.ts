@@ -42,4 +42,6 @@ export class Rpc {
   header = (block: string) => this.call<Header>("eth_getBlockByNumber", [block, false]);
   proof = (address: string, slots: string[], block: string) => this.call<Proof>("eth_getProof", [address, slots, block]);
   code = (address: string, block: string) => this.call<string>("eth_getCode", [address, block]);
+  /** ERC-20 balanceOf(holder), as the node computes it: only a hint, never the answer. */
+  balanceOf = async (token: string, holder: string, block: string) => String(BigInt((await this.call<string>("eth_call", [{ to: token, data: `0x70a08231${holder.slice(2).toLowerCase().padStart(64, "0")}` }, block])) || "0x0"));
 }

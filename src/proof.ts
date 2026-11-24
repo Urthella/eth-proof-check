@@ -137,6 +137,38 @@ export function checkAccount(stateRoot: string, proof: Proof, code?: string): Ac
   return result;
 }
 
+/** How many mapping indexes --erc20 tries: plain tokens declare their balances early. */
+const MAPPING_INDEXES = 20;
+
+export interface BalanceSlot {
+  index: number;
+  layout: "Solidity" | "Vyper";
+  key: string;
+}
+
+/** Where a balance mapping at index i keeps `holder`: keccak(holder, i) in Solidity, keccak(i, holder) in Vyper. */
+export function balanceSlots(holder: string): BalanceSlot[] {
+  const word = (hex: string) => hex.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+  const key = (a: string, b: string) => hex(keccak256(Buffer.from(word(a) + word(b), "hex")));
+  return Array.from({ length: MAPPING_INDEXES }, (_, i) => [
+    { index: i, layout: "Solidity" as const, key: key(holder, i.toString(16)) },
+    { index: i, layout: "Vyper" as const, key: key(i.toString(16), holder) },
+  ]).flat();
+}
+
+/**
+ * Finds the candidate slot whose proven value is `balance`, what balanceOf said. The value comes
+ * from the proof; balanceOf only picks the slot. Returns why not, when none or every empty one could.
+ */
+export function locateBalance(candidates: BalanceSlot[], account: AccountResult, balance: bigint): (BalanceSlot & { value: bigint; nodes: number }) | string {
+  if (balance === 0n) return "balanceOf says 0, which every empty slot holds too";
+  for (const c of candidates) {
+    const slot = account.slots.find((s) => BigInt(s.key) === BigInt(c.key));
+    if (slot && BigInt(slot.value) === balance) return { ...c, value: BigInt(slot.value), nodes: slot.nodes };
+  }
+  return `no balance mapping at indexes 0 to ${MAPPING_INDEXES - 1} holds ${balance}, what balanceOf says`;
+}
+
 export function headerHash(header: Header): string {
   const items: Buffer[] = [];
   for (const [name, kind] of FIELDS) {

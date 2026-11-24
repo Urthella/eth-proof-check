@@ -83,7 +83,7 @@ test("a storage proof leads from the account's storage root to the slot's value,
 });
 
 test("a header that doesn't hash to its block hash exits 1 on its own", () => {
-  const report = audit(load());
+  const report = audit({ ...load(), slots: [] });
   assert.equal(exitCode(report), 0);
   report.rebuilt = `0x${"00".repeat(32)}`;
   assert.equal(exitCode(report), 1);

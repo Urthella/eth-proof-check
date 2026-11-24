@@ -16,9 +16,16 @@ const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const { header, proofs, code }: { header: Header; proofs: Proof[]; code: Record<string, string> } = JSON.parse(gunzipSync(readFileSync(new URL("fixtures/mainnet.json.gz", import.meta.url))).toString());
 const [WETH, DEPOSIT, UNUSED] = proofs.map((p) => p.address);
 
+const erc20: { header: Header; tokens: { token: string; holder: string; proof: Proof; balance: string; code: string }[] } = JSON.parse(gunzipSync(readFileSync(new URL("fixtures/erc20.json.gz", import.meta.url))).toString());
+const [POOL, VECRV] = [erc20.tokens[0].holder, erc20.tokens[2].holder];
+const [, USDC, CRV] = erc20.tokens.map((t) => t.token);
+
 let rateLimits = 0;
 let richer = false;
 let otherRoot = false;
+/** Serve the --erc20 block and tokens instead. */
+let tokenMode = false;
+let lyingBalanceOf = false;
 const asked: unknown[][] = [];
 
 const server = createServer(async (request, response) => {
@@ -32,6 +39,17 @@ const server = createServer(async (request, response) => {
     return reply(429, {});
   }
   const ok = (result: unknown) => reply(200, { jsonrpc: "2.0", id, result });
+  if (tokenMode) {
+    const t = erc20.tokens.find((x) => x.token === (method === "eth_call" ? params[0].to : params[0])?.toLowerCase());
+    if (method === "eth_getBlockByNumber") return ok(erc20.header);
+    if (method === "eth_getCode") return ok(t!.code);
+    if (method === "eth_call") {
+      const holder = `0x${params[0].data.slice(-40)}`;
+      const balance = t && t.holder === holder ? BigInt(t.balance) + (lyingBalanceOf ? 1n : 0n) : 0n;
+      return ok(`0x${balance.toString(16).padStart(64, "0")}`);
+    }
+    if (method === "eth_getProof") return ok({ ...t!.proof, storageProof: (params[1] as string[]).map((k) => t!.proof.storageProof.find((s) => BigInt(s.key) === BigInt(k))!) });
+  }
   if (method === "eth_getBlockByNumber") return ok(otherRoot ? { ...header, stateRoot: `0x${"11".repeat(32)}` } : header);
   if (method === "eth_getCode") return ok(code[params[0].toLowerCase()]);
   if (method === "eth_getProof") {
@@ -96,6 +114,34 @@ test("a header that doesn't hash to its block hash exits 1, and proofs don't rea
   }
 });
 
+test("--erc20 proves each token's balance from its storage, Vyper's mapping too", async () => {
+  tokenMode = true;
+  try {
+    const { code: exit, stdout, stderr } = await run("--erc20", POOL, WETH, USDC);
+    assert.equal(exit, 0, stderr);
+    assert.match(stdout, new RegExp(`\n    balance of ${POOL}: [\\d,]+, in the Solidity mapping at index 3, \\d+ proof nodes\n`));
+    assert.match(stdout, new RegExp(`\n    balance of ${POOL}: [\\d,]+, in the Solidity mapping at index 9, \\d+ proof nodes\n`));
+    assert.match(stdout, /check: 2 of 2 accounts match their proofs; 2 of 2 token balances found and proven$/m);
+    assert.doesNotMatch(stdout, /\n    slot /, "the candidate slots aren't listed");
+    const vyper = await run("--erc20", VECRV, CRV);
+    assert.equal(vyper.code, 0, vyper.stderr);
+    assert.match(vyper.stdout, /in the Vyper mapping at index 3, \d+ proof nodes\n/);
+  } finally {
+    tokenMode = false;
+  }
+});
+
+test("a balanceOf no candidate slot holds can't be proven, exit 2", async () => {
+  tokenMode = lyingBalanceOf = true;
+  try {
+    const { code: exit, stdout } = await run("--erc20", POOL, WETH);
+    assert.equal(exit, 2, stdout);
+    assert.match(stdout, /balance of 0x[0-9a-f]{40}: not found, no balance mapping at indexes 0 to 19 holds \d+, what balanceOf says\n/);
+  } finally {
+    tokenMode = lyingBalanceOf = false;
+  }
+});
+
 test("a node that rate-limits is asked again", async () => {
   rateLimits = 2;
   const { code: exit, stderr } = await run(UNUSED);
@@ -110,7 +156,7 @@ test("a node without the state exits 2 with its reason", async () => {
 });
 
 test("bad arguments and an unreachable node exit 2", async () => {
-  for (const args of [[], ["0x1234"], ["--block", "yesterday", WETH], ["--slot", "x", WETH], ["--slot", `0x1${"0".repeat(64)}`, WETH], ["--depth", "1", WETH]]) {
+  for (const args of [[], ["0x1234"], ["--erc20", "0x1234", WETH], ["--block", "yesterday", WETH], ["--slot", "x", WETH], ["--slot", `0x1${"0".repeat(64)}`, WETH], ["--depth", "1", WETH]]) {
     const bad = await run(...args);
     assert.equal(bad.code, 2, `${args}: ${bad.stderr}`);
     assert.match(bad.stderr, /usage: eth-proof-check/);
