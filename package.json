@@ -1,0 +1,22 @@
+{
+  "name": "eth-proof-check",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Checks Ethereum account and storage values against a block's state root, from eth_getProof's Merkle-Patricia proofs and a header that hashes to its block hash",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "eth-proof-check": "src/main.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
