@@ -25,8 +25,9 @@ dependencies, its own Keccak-256 and RLP, so every step can be read:
 
 - **WETH** holds 2,215,862.93 ETH at block 26,485,152, proven by 9 nodes from the state root. Its
   storage slot 0 holds the string "Wrapped Ether", proven by 7 more.
-- **An address nobody has used** is proven empty: 8 nodes lead to a branch with nothing where the
-  address would be.
+- **An address nobody has used** is proven empty: 8 nodes lead to another account's leaf, whose
+  path turns away from this address. An empty slot can end either way: WETH's slot 0x99 at a
+  leaf, the deposit contract's at a branch with nothing in its place.
 
 ## Quick start
 
