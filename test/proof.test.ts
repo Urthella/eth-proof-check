@@ -105,3 +105,11 @@ test("an extension node, which the saved mainnet paths don't cross, leads on to 
   assert.equal(walk(root, k2, [extension, branch, l2].map(hex))?.toString("hex"), "bb".repeat(32));
   assert.equal(walk(root, off, [hex(extension)]), undefined, "a key off the extension's path isn't there");
 });
+
+test("a slot the node was asked for and left out fails", () => {
+  const { header, proofs, code } = load();
+  const weth = proofs[0];
+  const asked = weth.storageProof.map((s) => s.key);
+  weth.storageProof.pop();
+  assert.match(checkAccount(header.stateRoot, weth, code[weth.address], asked).problems.join(), /the node left out slot 0x99/);
+});

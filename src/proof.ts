@@ -92,14 +92,17 @@ export interface AccountResult {
 
 const hex = (b: Uint8Array) => `0x${Buffer.from(b).toString("hex")}`;
 const toBigInt = (b: Uint8Array) => (b.length ? BigInt(hex(b)) : 0n);
-const slotKey = (key: string) => keccak256(Buffer.from(BigInt(key).toString(16).padStart(64, "0"), "hex"));
+/** A number or hex value as a 32-byte word, in hex. */
+const word = (value: string | number) => BigInt(value).toString(16).padStart(64, "0");
+const slotKey = (key: string) => keccak256(Buffer.from(word(key), "hex"));
 
 /**
  * Checks eth_getProof's answer for one account against `stateRoot`: the account, or its absence,
  * must be what the node claims, each slot's value must sit under the account's storage root, and
- * the code, when given, must hash to the account's code hash.
+ * the code, when given, must hash to the account's code hash. Every key in `asked` must have a
+ * proof: a node that leaves one out hasn't proven it.
  */
-export function checkAccount(stateRoot: string, proof: Proof, code?: string): AccountResult {
+export function checkAccount(stateRoot: string, proof: Proof, code?: string, asked: string[] = []): AccountResult {
   const result: AccountResult = { address: proof.address, exists: false, nonce: "0", balance: "0", codeSize: code === undefined ? undefined : data(code).length, nodes: proof.accountProof.length, slots: [], problems: [] };
   const problem = (where: string, error: unknown) => result.problems.push(`${where}: ${(error as Error).message}`);
   let storageRoot = EMPTY_ROOT;
@@ -120,6 +123,7 @@ export function checkAccount(stateRoot: string, proof: Proof, code?: string): Ac
   } catch (error) {
     problem("account proof", error);
   }
+  for (const key of asked) if (!proof.storageProof.some((s) => BigInt(s.key) === BigInt(key))) result.problems.push(`the node left out slot ${key}`);
   for (const slot of proof.storageProof) {
     try {
       const found = walk(storageRoot, slotKey(slot.key), slot.proof);
@@ -135,6 +139,41 @@ export function checkAccount(stateRoot: string, proof: Proof, code?: string): Ac
     if (hash !== codeHash) result.problems.push(`eth_getCode's ${data(code).length} bytes hash to ${hash}, not the account's code hash ${codeHash}`);
   }
   return result;
+}
+
+/** How many mapping indexes --erc20 tries: plain tokens declare their balances early. */
+const MAPPING_INDEXES = 20;
+
+export interface BalanceSlot {
+  index: number;
+  layout: "Solidity" | "Vyper";
+  key: string;
+}
+
+/** Where a balance mapping at index i keeps `holder`: keccak(holder, i) in Solidity, keccak(i, holder) in Vyper. */
+export function balanceSlots(holder: string): BalanceSlot[] {
+  const key = (a: string | number, b: string | number) => hex(keccak256(Buffer.from(word(a) + word(b), "hex")));
+  return Array.from({ length: MAPPING_INDEXES }, (_, i) => [
+    { index: i, layout: "Solidity" as const, key: key(holder, i) },
+    { index: i, layout: "Vyper" as const, key: key(i, holder) },
+  ]).flat();
+}
+
+export type Located = { found: BalanceSlot & { value: string; nodes: number } } | { reason: string };
+
+/**
+ * Finds the candidate slot whose proven value is `balance`, what balanceOf said. The value comes
+ * from the proof; balanceOf only picks the slot, so it must pick exactly one.
+ */
+export function locateBalance(candidates: BalanceSlot[], account: AccountResult, balance: bigint | undefined): Located {
+  if (balance === undefined) return { reason: "balanceOf gave no 32-byte answer: not a token, or the call reverted" };
+  if (balance === 0n) return { reason: "balanceOf says 0, which every empty slot holds too" };
+  const matches = candidates.flatMap((c) => {
+    const slot = account.slots.find((s) => BigInt(s.key) === BigInt(c.key));
+    return slot && BigInt(slot.value) === balance ? [{ ...c, value: slot.value, nodes: slot.nodes }] : [];
+  });
+  if (matches.length > 1) return { reason: `${matches.length} candidate slots hold ${balance}, so which is the balance can't be told` };
+  return matches.length ? { found: matches[0] } : { reason: `no balance mapping at indexes 0 to ${MAPPING_INDEXES - 1} holds ${balance}, what balanceOf says` };
 }
 
 export function headerHash(header: Header): string {

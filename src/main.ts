@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // eth-proof-check: checks Ethereum accounts and storage slots against a block's state root, from
 // eth_getProof's Merkle-Patricia proofs and a header that must hash to its block hash. Exits 1 if
-// a proof doesn't hold, 2 if it couldn't check.
+// a proof doesn't hold, 2 if it couldn't check or, with --erc20, couldn't find a balance to prove.
 
 import { parseArgs } from "node:util";
 
 import { audit, collect, describe, exitCode } from "./audit.ts";
 import { Rpc } from "./rpc.ts";
 
-const USAGE = "usage: eth-proof-check [--rpc URL] [--block N|latest|finalized|safe] [--slot SLOT]... [--json] ADDRESS...";
+const USAGE = "usage: eth-proof-check [--rpc URL] [--block N|latest|finalized|safe] [--slot SLOT]... [--erc20 HOLDER] [--json] ADDRESS...";
 const MAX_SLOT = (1n << 256n) - 1n;
 
 async function main(): Promise<number> {
@@ -21,6 +21,7 @@ async function main(): Promise<number> {
         rpc: { type: "string", default: "https://ethereum-rpc.publicnode.com" },
         block: { type: "string", default: "latest" },
         slot: { type: "string", multiple: true, default: [] },
+        erc20: { type: "string" },
         json: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
@@ -38,7 +39,7 @@ async function main(): Promise<number> {
     return 2;
   };
   if (!positionals.length) return bad("no address given");
-  const invalid = positionals.find((a) => !/^0x[0-9a-fA-F]{40}$/.test(a));
+  const invalid = [...positionals, ...(values.erc20 === undefined ? [] : [values.erc20])].find((a) => !/^0x[0-9a-fA-F]{40}$/.test(a));
   if (invalid) return bad(`not an address: ${invalid}`);
   if (!/^(latest|finalized|safe|\d+)$/.test(values.block)) return bad(`--block must be a number, latest, finalized or safe: ${values.block}`);
   const block = /^\d+$/.test(values.block) ? `0x${BigInt(values.block).toString(16)}` : values.block;
@@ -49,7 +50,7 @@ async function main(): Promise<number> {
     slots.push(`0x${n.toString(16)}`);
   }
   try {
-    const report = audit(await collect(new Rpc(values.rpc), block, positionals, slots));
+    const report = audit(await collect(new Rpc(values.rpc), block, positionals, slots, values.erc20?.toLowerCase()));
     console.log(values.json ? JSON.stringify(report, null, 2) : describe(report));
     return exitCode(report);
   } catch (error) {

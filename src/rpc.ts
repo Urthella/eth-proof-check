@@ -3,6 +3,9 @@
 const ATTEMPTS = 4;
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
+/** An error the node answered with, as opposed to not answering. */
+export class RpcError extends Error {}
+
 /** A block header as eth_getBlockByNumber returns it. */
 export type Header = Record<string, string> & { hash: string; number: string; stateRoot: string };
 
@@ -33,7 +36,7 @@ export class Rpc {
       }
       if (!response.ok) throw new Error(`${method}: HTTP ${response.status}`);
       const body = (await response.json()) as { result?: T; error?: { message: string } };
-      if (body.error) throw new Error(`${method}: ${body.error.message}`);
+      if (body.error) throw new RpcError(`${method}: ${body.error.message}`);
       if (body.result === undefined || body.result === null) throw new Error(`${method}: no result`);
       return body.result;
     }
@@ -42,4 +45,16 @@ export class Rpc {
   header = (block: string) => this.call<Header>("eth_getBlockByNumber", [block, false]);
   proof = (address: string, slots: string[], block: string) => this.call<Proof>("eth_getProof", [address, slots, block]);
   code = (address: string, block: string) => this.call<string>("eth_getCode", [address, block]);
+  /** ERC-20 balanceOf(holder), as the node computes it: only a hint, never the answer. */
+  async balanceOf(token: string, holder: string, block: string): Promise<string | undefined> {
+    try {
+      const word = await this.call<string>("eth_call", [{ to: token, data: `0x70a08231${holder.slice(2).toLowerCase().padStart(64, "0")}` }, block]);
+      // An address with no code answers "0x"; anything but one 32-byte word isn't a balance.
+      return /^0x[0-9a-fA-F]{64}$/.test(word) ? String(BigInt(word)) : undefined;
+    } catch (error) {
+      // A revert is an answer: not a balance. A node that doesn't answer still stops the run.
+      if (error instanceof RpcError) return undefined;
+      throw error;
+    }
+  }
 }
