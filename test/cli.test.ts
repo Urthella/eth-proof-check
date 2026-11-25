@@ -26,6 +26,10 @@ let otherRoot = false;
 /** Serve the --erc20 block and tokens instead. */
 let tokenMode = false;
 let lyingBalanceOf = false;
+/** balanceOf on WETH reverts, or answers "0x" as an address with no code does. */
+let reverting: false | "revert" | "empty" = false;
+/** eth_getProof leaves out the first slot it was asked for. */
+let leaveOut = false;
 const asked: unknown[][] = [];
 
 const server = createServer(async (request, response) => {
@@ -44,11 +48,12 @@ const server = createServer(async (request, response) => {
     if (method === "eth_getBlockByNumber") return ok(erc20.header);
     if (method === "eth_getCode") return ok(t!.code);
     if (method === "eth_call") {
+      if (reverting && t?.token === WETH) return reverting === "revert" ? reply(200, { jsonrpc: "2.0", id, error: { code: 3, message: "execution reverted" } }) : ok("0x");
       const holder = `0x${params[0].data.slice(-40)}`;
       const balance = t && t.holder === holder ? BigInt(t.balance) + (lyingBalanceOf ? 1n : 0n) : 0n;
       return ok(`0x${balance.toString(16).padStart(64, "0")}`);
     }
-    if (method === "eth_getProof") return ok({ ...t!.proof, storageProof: (params[1] as string[]).map((k) => t!.proof.storageProof.find((s) => BigInt(s.key) === BigInt(k))!) });
+    if (method === "eth_getProof") return ok({ ...t!.proof, storageProof: (params[1] as string[]).slice(leaveOut ? 1 : 0).map((k) => t!.proof.storageProof.find((s) => BigInt(s.key) === BigInt(k))!) });
   }
   if (method === "eth_getBlockByNumber") return ok(otherRoot ? { ...header, stateRoot: `0x${"11".repeat(32)}` } : header);
   if (method === "eth_getCode") return ok(code[params[0].toLowerCase()]);
@@ -121,7 +126,10 @@ test("--erc20 proves each token's balance from its storage, Vyper's mapping too"
     assert.equal(exit, 0, stderr);
     assert.match(stdout, new RegExp(`\n    balance of ${POOL}: [\\d,]+, in the Solidity mapping at index 3, \\d+ proof nodes\n`));
     assert.match(stdout, new RegExp(`\n    balance of ${POOL}: [\\d,]+, in the Solidity mapping at index 9, \\d+ proof nodes\n`));
-    assert.match(stdout, /check: 2 of 2 accounts match their proofs; 2 of 2 token balances found and proven$/m);
+    assert.match(stdout, /check: 2 of 2 accounts match their proofs; 2 of 2 token balances found in them$/m);
+    const json = JSON.parse((await run("--json", "--erc20", POOL, WETH)).stdout);
+    assert.deepEqual([json.accounts[0].erc20.found.index, json.accounts[0].erc20.found.layout], [3, "Solidity"]);
+    assert.equal(json.accounts[0].erc20.found.value, erc20.tokens[0].balance, "the proven value is in the report");
     assert.doesNotMatch(stdout, /\n    slot /, "the candidate slots aren't listed");
     const vyper = await run("--erc20", VECRV, CRV);
     assert.equal(vyper.code, 0, vyper.stderr);
@@ -139,6 +147,33 @@ test("a balanceOf no candidate slot holds can't be proven, exit 2", async () => 
     assert.match(stdout, /balance of 0x[0-9a-f]{40}: not found, no balance mapping at indexes 0 to 19 holds \d+, what balanceOf says\n/);
   } finally {
     tokenMode = lyingBalanceOf = false;
+  }
+});
+
+test("a node that leaves out a candidate slot hasn't proven it, exit 1", async () => {
+  tokenMode = leaveOut = true;
+  try {
+    const { code: exit, stdout } = await run("--erc20", POOL, WETH);
+    assert.equal(exit, 1, stdout);
+    assert.match(stdout, /\n    the node left out slot 0x[0-9a-f]{64}\n/);
+  } finally {
+    tokenMode = leaveOut = false;
+  }
+});
+
+test("a token whose balanceOf reverts, or answers nothing, is reported not found, and the rest still are, exit 2", async () => {
+  tokenMode = true;
+  try {
+    for (const mode of ["revert", "empty"] as const) {
+      reverting = mode;
+      const { code: exit, stdout } = await run("--erc20", POOL, WETH, USDC);
+      assert.equal(exit, 2, stdout);
+      assert.match(stdout, /balance of 0x[0-9a-f]{40}: not found, balanceOf gave no 32-byte answer: not a token, or the call reverted\n/, mode);
+      assert.match(stdout, /in the Solidity mapping at index 9/, "USDC is still found");
+    }
+  } finally {
+    tokenMode = false;
+    reverting = false;
   }
 });
 

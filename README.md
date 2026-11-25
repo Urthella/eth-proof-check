@@ -77,7 +77,8 @@ The three accounts are WETH, the beacon chain deposit contract and an unused add
 - `--json` prints the report as JSON.
 
 Exit codes: 0 when everything holds, 1 when the header or a proof doesn't, and 2 when it couldn't
-check: a node without the block's state, or bad arguments.
+check: a node without the block's state, bad arguments, or with `--erc20` a balance it couldn't
+find to prove.
 
 ## What it does
 
@@ -97,12 +98,18 @@ check: a node without the block's state, or bad arguments.
 - **The keys** are Keccak-256 of the address for accounts, and of the slot as 32 bytes for
   storage. The account is the RLP of its nonce, balance, storage root and code hash; a slot's value
   is the RLP of its bytes.
+- **Every slot asked for must come back proven:** a node that leaves one out fails, exit 1.
 - **With `--erc20`**, one proof per token covers the 40 slots the holder's balance could be in:
   - Solidity's and Vyper's mapping at indexes 0 to 19, each checked like any slot.
   - `balanceOf`, through `eth_call`, says which one holds the balance: the value shown is the
     proof's, and `balanceOf` only picks the slot.
-  - A zero balance can't pick one, since every empty slot holds zero, so it's reported as not
-    found, exit 2, and so is a balance no candidate holds.
+  - Some answers can't pick exactly one, and each is reported as not found, exit 2, while the
+    other addresses are still checked:
+    - a zero balance, since every empty slot holds zero;
+    - a balance no candidate holds;
+    - a balance two candidates hold;
+    - a `balanceOf` that reverts, or doesn't answer with one 32-byte word, as an address that
+      isn't a token doesn't.
 
 ## How it's checked
 
@@ -123,10 +130,12 @@ check: a node without the block's state, or bad arguments.
 - **Token balances:** WETH and USDC held by the Uniswap v3 pool, and CRV held by Curve's
   vote-escrow contract, saved with all their candidate slots.
   - Each is found at its mapping, Vyper's for CRV, and proven.
-  - A zero balance, or one no slot holds, isn't found.
-  - End to end, `--erc20` lists only the balance, not the candidates, and a `balanceOf` that no
-    slot backs exits 2.
-- **Mutation testing:** thirty-three deliberate bugs were planted one at a time, and the tests
+  - No answer, a zero balance, a balance no slot holds, or one two slots hold, isn't found.
+  - A slot the node was asked for and left out fails.
+  - End to end, `--erc20` lists only the balance, not the candidates, with the proof's value in
+    the JSON. A `balanceOf` that no slot backs, that reverts, or that answers `0x` exits 2, and
+    the other tokens are still found.
+- **Mutation testing:** thirty-nine deliberate bugs were planted one at a time, and the tests
   caught every one.
 - **Live**, on 2026-11-24 from publicnode:
   - at block 26,485,152, WETH, the deposit contract and an unused address, all as above;

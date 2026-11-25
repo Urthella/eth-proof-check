@@ -1,6 +1,6 @@
 // Fetches a block's header and each account's proof at that block, and checks them all.
 
-import { type AccountResult, balanceSlots, checkAccount, headerHash, locateBalance } from "./proof.ts";
+import { type AccountResult, type BalanceSlot, balanceSlots, checkAccount, headerHash, locateBalance } from "./proof.ts";
 import type { Header, Proof, Rpc } from "./rpc.ts";
 
 export interface Fetched {
@@ -8,24 +8,34 @@ export interface Fetched {
   proofs: Proof[];
   /** Each account's code, by lowercase address. */
   code: Record<string, string>;
-  /** The slots asked for, and with --erc20 the holder and what balanceOf says, by lowercase address. */
-  slots: string[];
-  erc20?: { holder: string; balances: Record<string, string> };
+  /** The slots asked for with --slot. */
+  slots?: string[];
+  /** With --erc20: the holder, and what balanceOf said for each token, by lowercase address. */
+  erc20?: { holder: string; balanceOf: Record<string, string | undefined> };
 }
 
 export async function collect(rpc: Rpc, block: string, addresses: string[], slots: string[], holder?: string): Promise<Fetched> {
   const header = await rpc.header(block);
   // Every proof is asked for at the header's own number, so "latest" can't move between calls.
-  const fetched: Fetched = { header, proofs: [], code: {}, slots, erc20: holder ? { holder, balances: {} } : undefined };
+  const fetched: Fetched = { header, proofs: [], code: {}, slots, erc20: holder ? { holder, balanceOf: {} } : undefined };
   // With --erc20, one proof covers every slot the holder's balance could be in.
-  const keys = holder ? [...slots, ...balanceSlots(holder).map((s) => s.key)] : slots;
+  const keys = [...slots, ...(holder ? balanceSlots(holder).map((s) => s.key) : [])];
   for (const address of addresses) {
     const proof = await rpc.proof(address, keys, header.number);
     fetched.proofs.push(proof);
     fetched.code[proof.address.toLowerCase()] = await rpc.code(address, header.number);
-    if (holder) fetched.erc20!.balances[proof.address.toLowerCase()] = await rpc.balanceOf(address, holder, header.number);
+    if (holder) fetched.erc20!.balanceOf[proof.address.toLowerCase()] = await rpc.balanceOf(address, holder, header.number);
   }
   return fetched;
+}
+
+interface Erc20 {
+  holder: string;
+  /** What balanceOf said, which only picks the slot. */
+  balanceOf?: string;
+  /** Where the proof holds that balance, and the value it holds; or why it couldn't be found. */
+  found?: BalanceSlot & { value: string; nodes: number };
+  reason?: string;
 }
 
 export interface Report {
@@ -34,29 +44,20 @@ export interface Report {
   /** The hash the header's fields give, which must be the block hash. */
   rebuilt: string;
   accounts: (AccountResult & { erc20?: Erc20 })[];
-  /** The slots asked for with --slot. */
-  slots: string[];
 }
 
-interface Erc20 {
-  holder: string;
-  /** What balanceOf said, which only picks the slot. */
-  balanceOf: string;
-  /** Where the proof holds that balance, or why it couldn't be found. */
-  found?: { index: number; layout: string; nodes: number };
-  reason?: string;
-}
-
-export function audit({ header, proofs, code, slots, erc20 }: Fetched): Report {
+export function audit({ header, proofs, code, slots = [], erc20 }: Fetched): Report {
+  const candidates = erc20 ? balanceSlots(erc20.holder) : [];
+  const asked = [...slots, ...candidates.map((c) => c.key)];
   const accounts = proofs.map((p) => {
-    const account = checkAccount(header.stateRoot, p, code[p.address.toLowerCase()]);
+    const address = p.address.toLowerCase();
+    const account = checkAccount(header.stateRoot, p, code[address], asked);
     if (!erc20) return account;
-    const balanceOf = erc20.balances[p.address.toLowerCase()];
-    const located = locateBalance(balanceSlots(erc20.holder), account, BigInt(balanceOf));
-    const found = typeof located === "string" ? undefined : { index: located.index, layout: located.layout, nodes: located.nodes };
-    return { ...account, erc20: { holder: erc20.holder, balanceOf, found, reason: typeof located === "string" ? located : undefined } };
+    const balanceOf = erc20.balanceOf[address];
+    const located = locateBalance(candidates, account, balanceOf === undefined ? undefined : BigInt(balanceOf));
+    return { ...account, erc20: { holder: erc20.holder, balanceOf, ...located } };
   });
-  return { block: Number(header.number), hash: header.hash, rebuilt: headerHash(header), accounts, slots };
+  return { block: Number(header.number), hash: header.hash, rebuilt: headerHash(header), accounts };
 }
 
 /** 1 when the header or a proof doesn't hold; 2 when a token balance couldn't be found to prove. */
@@ -68,20 +69,24 @@ const ether = (wei: string) => (Number(BigInt(wei) / 10n ** 9n) / 1e9).toLocaleS
 export function describe(report: Report): string {
   const ok = report.rebuilt === report.hash;
   const lines = [`block ${number(report.block)}, ${report.hash}: ${ok ? "the header hashes to its block hash" : `the header hashes to ${report.rebuilt}, not its block hash`}`];
-  // --erc20's candidate slots are checked too, but only the ones asked for are shown.
-  const asked = (key: string) => report.slots.some((k) => BigInt(k) === BigInt(key));
+  let shown = 0;
   for (const a of report.accounts) {
     const code = a.codeSize ? `, ${number(a.codeSize)} bytes of code that hash to its code hash` : "";
     lines.push(a.exists ? `  ${a.address}: an account, ${a.nodes} proof nodes from the state root: nonce ${number(a.nonce)}, balance ${ether(a.balance)} ETH${code}` : `  ${a.address}: no account; ${a.nodes} proof nodes show nothing at this address`);
-    for (const s of a.slots.filter((s) => asked(s.key))) lines.push(`    slot ${s.key}: ${s.value === "0" ? "empty" : `0x${BigInt(s.value).toString(16).padStart(64, "0")}`}, ${s.nodes} proof nodes`);
-    if (a.erc20?.found) lines.push(`    balance of ${a.erc20.holder}: ${number(a.erc20.balanceOf)}, in the ${a.erc20.found.layout} mapping at index ${a.erc20.found.index}, ${a.erc20.found.nodes} proof nodes`);
-    if (a.erc20?.reason) lines.push(`    balance of ${a.erc20.holder}: not found, ${a.erc20.reason}`);
+    // --erc20's candidate slots are checked like the rest, but not listed.
+    const candidates = new Set(a.erc20 ? balanceSlots(a.erc20.holder).map((c) => BigInt(c.key)) : []);
+    for (const s of a.slots.filter((s) => !candidates.has(BigInt(s.key)))) {
+      lines.push(`    slot ${s.key}: ${s.value === "0" ? "empty" : `0x${BigInt(s.value).toString(16).padStart(64, "0")}`}, ${s.nodes} proof nodes`);
+      shown++;
+    }
+    const e = a.erc20;
+    if (e?.found) lines.push(`    balance of ${e.holder}: ${number(e.found.value)}, in the ${e.found.layout} mapping at index ${e.found.index}, ${e.found.nodes} proof nodes`);
+    if (e?.reason) lines.push(`    balance of ${e.holder}: not found, ${e.reason}`);
     for (const p of a.problems) lines.push(`    ${p}`);
   }
-  const slots = report.accounts.flatMap((a) => a.slots.filter((s) => asked(s.key)));
   const good = report.accounts.filter((a) => !a.problems.length);
   const tokens = report.accounts.filter((a) => a.erc20);
-  const balances = tokens.length ? `; ${tokens.filter((a) => a.erc20!.found).length} of ${tokens.length} token balances found and proven` : "";
-  lines.push(`  check: ${good.length} of ${report.accounts.length} accounts match their proofs${slots.length ? `, with ${slots.length} slots` : ""}${balances}`);
+  const balances = tokens.length ? `; ${tokens.filter((a) => a.erc20!.found).length} of ${tokens.length} token balances found in them` : "";
+  lines.push(`  check: ${good.length} of ${report.accounts.length} accounts match their proofs${shown ? `, with ${shown} slots` : ""}${balances}`);
   return lines.join("\n");
 }

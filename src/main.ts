@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // eth-proof-check: checks Ethereum accounts and storage slots against a block's state root, from
 // eth_getProof's Merkle-Patricia proofs and a header that must hash to its block hash. Exits 1 if
-// a proof doesn't hold, 2 if it couldn't check.
+// a proof doesn't hold, 2 if it couldn't check or, with --erc20, couldn't find a balance to prove.
 
 import { parseArgs } from "node:util";
 

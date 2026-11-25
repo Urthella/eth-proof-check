@@ -83,7 +83,7 @@ test("a storage proof leads from the account's storage root to the slot's value,
 });
 
 test("a header that doesn't hash to its block hash exits 1 on its own", () => {
-  const report = audit({ ...load(), slots: [] });
+  const report = audit(load());
   assert.equal(exitCode(report), 0);
   report.rebuilt = `0x${"00".repeat(32)}`;
   assert.equal(exitCode(report), 1);
@@ -104,4 +104,12 @@ test("an extension node, which the saved mainnet paths don't cross, leads on to 
   assert.equal(walk(root, k1, [extension, branch, l1].map(hex))?.toString("hex"), "aa".repeat(32));
   assert.equal(walk(root, k2, [extension, branch, l2].map(hex))?.toString("hex"), "bb".repeat(32));
   assert.equal(walk(root, off, [hex(extension)]), undefined, "a key off the extension's path isn't there");
+});
+
+test("a slot the node was asked for and left out fails", () => {
+  const { header, proofs, code } = load();
+  const weth = proofs[0];
+  const asked = weth.storageProof.map((s) => s.key);
+  weth.storageProof.pop();
+  assert.match(checkAccount(header.stateRoot, weth, code[weth.address], asked).problems.join(), /the node left out slot 0x99/);
 });
